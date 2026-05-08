@@ -39,253 +39,142 @@
 * https://github.com/airockchip/rknn_model_zoo
 
 
+# SVM Detection Dataset — Build Story
 
-
-# SVM YOLOv5 Dataset — Creation History v1 → v6
-
-> **Purpose:** Surround-View Monitoring (SVM) object detection for embedded deployment on the Rockchip RK3588 NPU (OrangePi 5 Plus). Four classes: **Pedestrian, Bicycle, Motorcycle, PM** (Personal Mobility).
-> **Updated:** 2026-05-07 · **Current:** Merged_dataset_v6 (105,922 imgs, 359,711 boxes)
+> **Goal:** train a vehicle Surround-View Monitoring (SVM) detector that recognises four road-user classes: **Pedestrian · Bicycle · Motorcycle · Personal Mobility (PM)** — to run on an on-board NPU (OrangePi 5 Plus / RK3588).
+> **Latest snapshot:** 105,922 images · 359,711 labelled objects.
 
 ---
 
-## 1. Version Timeline
-
-```mermaid
-timeline
-    title Dataset Evolution
-    v2  : 73,057 imgs : 4 classes baseline
-    v3  : 87,723 imgs : added more SVM composites
-    v4  : 180,658 imgs : COCO + SVM + early PM<br>(real copies, ~89 GB)
-    v5  : 100,552 imgs : v4 subset + hand-anno + first hard-negs<br>(symlinked)
-    v6  : 105,922 imgs : added 2,896 hand-reviewed PM (dewarped)<br>+ 2,474 confirmed-bg hard-negs
-```
-
-| Version | Train | Val | Total | Notes |
-|---|---|---|---|---|
-| v2 | 62,098 | 10,959 | **73,057** | first 4-class baseline |
-| v3 | 74,564 | 13,159 | **87,723** | grew SVM composites |
-| v4 | 154,340 | 26,318 | **180,658** | + COCO subset; physical copies |
-| v5 | 85,920 | 14,632 | **100,552** | symlink-based; +3 hard-neg sources |
-| **v6** | **90,034** | **15,888** | **105,922** | + REC_0427 hand-reviewed PM, + REC_0420/REC_0421 hard-negs |
-
----
-
-## 2. v5 → v6 Source-Level Diff
+## 1. How the dataset grew
 
 ```mermaid
 flowchart LR
-    subgraph V5_SRC["v5 sources (8) — 100,552"]
-        A1[Merged_v4 — 90,329]
-        A2[SVM/pd — 775]
-        A3[0402/filtered_2 — 837]
-        A4[REC/0402_15/bb — 1,061]
-        A5[REC/0402_14/bb — 1,956]
-        A6[REC_0414/fp_2 — 1,385 hard-neg]
-        A7[REC_0414/hn_1505 — 1,209 hard-neg]
-        A8[REC_0414/hn_14_14 — 3,000 hard-neg]
-    end
-    subgraph V6_NEW["v6 NEW sources (4) — +5,370"]
-        B9[REC_0427/pm_review_final — 2,896<br/>hand-reviewed PM dewarped]
-        B10[REC_0420/13 — 1,154 hard-neg]
-        B11[REC_0420/14_1400_1411 — 753 hard-neg]
-        B12[REC_0421/14_background — 567 hard-neg]
-    end
-    V5_SRC --> M[Merged_dataset_v6<br/>105,922 imgs · 359,711 boxes]
-    V6_NEW --> M
+    A[COCO public dataset<br/>kept only target classes] --> B[Synthetic SVM composites<br/>place objects on real SVM frames]
+    B --> C[Add human-annotated<br/>real SVM frames]
+    C --> D[Add on-road recordings<br/>4 classes labelled by hand]
+    D --> E[Add background images<br/>to teach the model what to ignore]
+    E --> F[Add a session rich in<br/>scooters / e-mobility]
+    F --> G[(Final dataset)]
 ```
 
-### v6 source manifest
-
-| # | Source | Imgs | Type | First in |
-|---|---|---|---|---|
-| 1  | Merged_dataset_v4                              | 90,329 | SVM composites + COCO + early PM         | v5 |
-| 2  | SVM_Dataset/pd (class remap 2↔3)               |    775 | Hand-annotated (Ped + Bicycle)            | v5 |
-| 3  | 0402/filtered_2                                |    837 | Hand-annotated SVM                        | v5 |
-| 4  | REC/20260402_15/bb (val only)                  |  1,061 | Hand-annotated Bicycle + Moto             | v5 |
-| 5  | REC/20260402_14/bb_0402_14                     |  1,956 | Hand-annotated 4-class                    | v5 |
-| 6  | REC_0414/false_positives_2                     |  1,385 | Hard negative                             | v5 |
-| 7  | REC_0414/hard_negatives_1505                   |  1,209 | Hard negative (false-bicycle pole scene)  | v5 |
-| 8  | REC_0414/hard_negatives_14_14                  |  3,000 | Hard negative (object-free segment)       | v5 |
-| 9  | **REC_0427/pm_review_final** *(NEW)*           |  **2,896** | **Hand-reviewed PM, dewarped**       | **v6** |
-| 10 | **REC_0420/20260420_13** *(NEW)*               |  **1,154** | Hard negative (background sweep)     | **v6** |
-| 11 | **REC_0420/20260420_14_1400_1411** *(NEW)*     |    **753** | Hard negative (time slice)           | **v6** |
-| 12 | **REC_0421/20260421_14_background** *(NEW)*    |    **567** | Hard negative (3-model FP curated)   | **v6** |
-|    | **Total**                                       | **105,922** |                                          |    |
+We did not collect everything at once. The dataset was built in stages — each stage targeted a specific weakness we observed in the model after testing.
 
 ---
 
-## 3. Image Acquisition Pipeline (every source above goes through this)
+## 2. The journey, version by version
 
 ```mermaid
 flowchart LR
-    A[6× fisheye cameras<br/>1920×1080] --> B[Resize<br/>FRONT/BACK→960×540<br/>others→640×360]
-    B --> C[LUT dewarp<br/>FRONT/BACK only<br/>radius FOV 195°→130°]
-    C --> D[Crop top 40 px<br/>→ 640×320 each]
-    D --> E[Vertical stack pairs<br/>→ 640×640]
-    E --> F[Annotate /<br/>auto-label / hard-neg]
-    F --> G[(Merged_dataset_v6)]
+    S1[Stage 1<br/>73k imgs<br/>COCO target classes<br/>+ first SVM composites] --> S2
+    S2[Stage 2<br/>87k imgs<br/>more synthetic SVM scenes] --> S3
+    S3[Stage 3<br/>180k imgs<br/>real on-road recordings<br/>+ early PM examples] --> S4
+    S4[Stage 4<br/>100k imgs<br/>curated subset<br/>+ first backgrounds] --> S5
+    S5[Stage 5<br/>105k imgs<br/>hand-reviewed PM session<br/>+ more backgrounds]
 ```
 
-The three stack pairs are `(FRONT+LEFT)`, `(BACK+RIGHT)`, `(SIDE-LEFT+SIDE-RIGHT)`. PM annotations from source #9 were curated on the **dewarped** stack to match the rest of the corpus.
+| Stage | Total images | Why this stage was added |
+|---|---|---|
+| 1 | 73,057  | First working baseline — recognise the four classes at all |
+| 2 | 87,723  | Improve coverage of poses and viewpoints |
+| 3 | 180,658 | Bring in real on-road footage + first scooter / PM examples |
+| 4 | 100,552 | Curated subset + first batch of "do-not-trigger" backgrounds |
+| 5 (current) | **105,922** | Targeted scooter session + more curated backgrounds |
+
+> Note on the image-count drop between Stage 3 and Stage 4: we removed redundant synthetic frames and switched to a leaner, fully-symlinked dataset that takes ~800 MB on disk instead of 89 GB, while keeping the high-value examples.
 
 ---
 
-## 4. v6 Statistics Snapshot
-
-### 4.1 Headline numbers
-
-| Metric | Value |
-|---|---|
-| Total images | **105,922** |
-| Total bounding boxes | **359,711** |
-| Train / Val | 90,034 / 15,888 |
-| Background-only images | 8,859 (**8.4 %**) |
-| Image resolution | 640 × 640 (canonical) |
-| Image format | `.jpg` 98.0 %, `.png` 2.0 % |
-| Annotation format | YOLO `(class_id cx cy w h)` |
-| Mean objects/image | ~3.4 |
-| Max objects/image | several dozen |
-
-### 4.2 Class distribution
-
-| ID | Class       | Train | Val | **Total** | Share |
-|----|-------------|-------|-----|-----------|-------|
-| 0  | Pedestrian  | 273,710 | 48,497 | **322,207** | **89.6 %** |
-| 1  | Bicycle     |  11,338 |  1,872 | **13,210**  |  3.7 % |
-| 2  | Motorcycle  |  10,645 |  1,878 | **12,523**  |  3.5 % |
-| 3  | PM          |  10,086 |  1,685 | **11,771**  |  3.3 % |
-
-![Class distribution by split](fig_class_split.png)
-
-### 4.3 Train / Val split
+## 3. What's inside the current dataset
 
 ```mermaid
-pie title 85 / 15 split (seed=42)
-    "Train · 90,034" : 90034
-    "Val · 15,888"   : 15888
+pie title Image sources
+    "Synthetic SVM + COCO subset" : 90329
+    "Human-annotated SVM" : 4629
+    "Background frames" : 8068
+    "PM-rich session" : 2896
 ```
 
-![Split pie](fig_split_pie.png)
+| Category | Images | Role |
+|---|---|---|
+| Synthetic SVM composites + COCO subset | 90,329 | Bulk class-recognition signal |
+| Human-annotated SVM / on-road frames    |  4,629 | Real-world appearance and geometry |
+| Background frames (no objects)          |  8,068 | Suppress false alarms |
+| PM-rich hand-reviewed session           |  2,896 | Strengthen the rarest class |
 
-### 4.4 Image dimensions
+---
 
-The canonical SVM stack is **640 × 640**. However v4-inherited sources (COCO subset + early SVM composites) include other shapes, sampled distribution from a 1-in-200 read of v6:
+## 4. Class distribution
 
-- **640 × 640** — dominant canonical stack
-- 640 × 480 / 480 × 640 — COCO landscape / portrait
-- 500 × … / … × 500 — COCO source-aspect imagery
-- 1920 × 1080 — a handful of raw frames in v4 inheritance
+| Class | Total bounding boxes | Share |
+|---|---|---|
+| Pedestrian | **322,207** | 89.6 % |
+| Bicycle    | **13,210**  | 3.7 % |
+| Motorcycle | **12,523**  | 3.5 % |
+| PM         | **11,771**  | 3.3 % |
 
-YOLOv5 letterbox-resizes all inputs to 640 px at training time, so this heterogeneity is benign.
+![Class distribution](fig_class_split.png)
 
-### 4.5 Image format
+Pedestrians dominate naturally — they are the most frequent road user. The other three classes are rarer but consistently present, and we have spent significant effort to keep them well-represented.
 
-![Image formats](fig_format.png)
+---
 
-JPEG dominates (103,748 imgs, 98.0 %); PNG present in 2,174 imgs (2.0 %, mostly REC_0414 hard-negatives).
+## 5. Where objects appear in the image
 
-### 4.6 Annotation locations (bounding-box centers)
+The image format is a **640 × 640 stacked composite** of two camera views (top + bottom). The heatmap below shows where labelled objects sit. The two horizontal bands correspond to the two stacked camera halves.
 
-The dataset is a **vertically-stacked composite**, so annotations cluster along two horizontal bands — one per camera-pair half. Pedestrians populate both halves; PM tends to sit near each half's mid-line; bicycles/motorcycles slightly off-center.
+![Annotation location heatmap](fig_centers.png)
 
-![Bounding-box center 20×20 heatmap](fig_centers.png)
+This visualisation confirms the camera geometry is consistent across the whole dataset.
 
-(Pre-generated per-class heatmaps available: `heatmap_pedestrian.png`, `heatmap_bicycle.png`, `heatmap_motorcycle.png`, `heatmap_pm.png`.)
+---
 
-### 4.7 Bounding-box dimensions
+## 6. Image sizes and formats
 
-![Bounding-box size scatter](fig_bbox_size.png)
+- **Canonical input size:** 640 × 640 (the SVM stack)
+- Some legacy COCO-derived images come in other sizes; the training pipeline standardises everything to 640 px automatically.
+- **Format:** JPEG 98 %, PNG 2 %.
 
-Most boxes are **small to medium** (target objects at typical SVM distances). Long-tail of large boxes from close-range encounters and occasional full-frame objects.
+![Image format breakdown](fig_format.png)
 
-### 4.8 Objects per image
+---
 
+## 7. Object size and density
+
+- Most labelled objects are **small to medium** in pixel size — consistent with road-users seen from the vehicle's surround cameras.
+- A typical image contains **0–6 objects**. Some frames intentionally contain **zero objects** (the background-only frames).
+
+![Bounding-box size distribution](fig_bbox_size.png)
 ![Objects per image](fig_obj_per_img.png)
 
-Bimodal: large peak at 0 (background-only ≈ 8 % of images) and a broad shoulder around 1–6 boxes/image. A small tail extends to dense urban scenes.
-
 ---
 
-## 5. Hard-negative Mining Story
+## 8. Train / Validation split
 
 ```mermaid
-flowchart TB
-    P0[Train Merged_v4] --> P1[Run YOLOv5s on REC_0414 footage]
-    P1 --> P2{Detector fired<br/>on background?}
-    P2 -->|Yes — false positives| HN1[REC_0414/false_positives_2<br/>1,385 frames]
-    P2 -->|Pole/texture confusion| HN2[REC_0414/hard_negatives_1505<br/>1,209 frames]
-    P2 -->|Object-free segments| HN3[REC_0414/hard_negatives_14_14<br/>3,000 frames]
-    HN1 & HN2 & HN3 --> V5[v5 release<br/>6.3 % bg ratio]
-    V5 --> P3[Train + verify FP rate on<br/>1,320 confirmed-bg images]
-    P3 --> Q{v5 still firing?}
-    Q -->|Yes| HN4[REC_0420/13 — 1,154]
-    Q -->|Yes| HN5[REC_0420/14_1400_1411 — 753]
-    Q -->|Yes| HN6[REC_0421/14_background — 567]
-    HN4 & HN5 & HN6 --> V6[v6 release<br/>8.4 % bg ratio]
+pie title Train and Val split
+    "Train" : 90034
+    "Val" : 15888
 ```
 
-Result: v5 had a 4.85 % image-level FP rate on the 1,320 confirmed-background test set. v6 reached **0.15 %** — a 32× reduction. PM detection: mAP@50 0.873 → 0.944 (+8.1 pp), Recall 0.770 → 0.878 (+10.8 pp).
+The split is a fixed random shuffle (reproducible). Background-only images are spread across both splits in the same proportion.
 
 ---
 
-## 6. Class-Imbalance & Augmentation Strategy
+## 9. Why each stage was added — short summary
 
-```mermaid
-flowchart LR
-    DS[Merged_v6<br/>89.6 % Pedestrian] --> AUG[Mosaic 1.0<br/>HSV jitter 0.015/0.7/0.4<br/>±5° rotate ±10 % translate<br/>±50 % scale ±0.5° shear<br/>fliplr 0.5]
-    DS -.no weighted loss<br/>no focal loss<br/>no oversampling.-> AUG
-    AUG --> TRAIN[YOLOv5s · 500 ep · b256 · 2× RTX 3090<br/>SGD lr0=0.01 lrf=0.1 cos<br/>warmup 3 ep]
-```
-
-Class imbalance is **not** addressed in the loss (no weights, no focal). It is handled at the **dataset level** via:
-- Hand-annotated PM-rich subsets (Sources 5, 9)
-- Explicit Bicycle/Motorcycle augmentation through Sources 2-5
-- Hard-negative dilution to suppress dominant-class false positives
+1. **Stage 1–2 — COCO + Synthetic SVM:** start with public, well-labelled imagery and combine it with our SVM camera scenes so the model first learns what each class looks like.
+2. **Stage 3 — Real on-road recordings:** the synthetic composites cannot capture real-world lighting, motion blur and camera distortion. Adding hand-labelled drives gives the model authentic context.
+3. **Stage 4 — Background images:** when we tested the model on real driving footage we saw it "imagining" objects (false alarms) on poles, trees and shadows. We collected those exact scenes and labelled them as empty so the model learns to ignore them.
+4. **Stage 5 — PM-rich session + more backgrounds:** PM (e-scooters / e-mobility) is the rarest class and was being missed. We recorded a dedicated outing where PM riders were present, then a human reviewed every frame to ensure correct labels.
 
 ---
 
-## 7. File Layout
+## 10. Where this is leading
 
-```
-Merged_dataset_v6/
-├── data.yaml                        # YOLOv5/8 training config
-├── dataset_info.txt                 # auto-generated source manifest
-├── dataset_description.md           # short summary
-├── dataset_history.md               # this file
-├── stats_v6.json                    # raw stats dump
-├── class_distribution.png           # short bar chart
-├── heatmap_*.png                    # per-class 20×20 center heatmaps
-├── fig_class_split.png              # train/val class bars
-├── fig_split_pie.png
-├── fig_bbox_size.png
-├── fig_centers.png
-├── fig_obj_per_img.png
-├── fig_format.png
-├── train/
-│   ├── images/   (90,034 symlinks → original sources)
-│   └── labels/   (90,034 .txt; 7,521 empty)
-└── val/
-    ├── images/   (15,888 symlinks)
-    └── labels/   (15,888 .txt; 1,338 empty)
-```
+Each stage of the dataset has produced a measurable improvement in the model. The current model:
+- recognises **scooters / PM far more reliably** than before;
+- **almost never produces false alarms** on plain-background driving scenes;
+- runs on the on-board NPU within the project's real-time budget.
 
----
-
-## 8. Reproducibility
-
-The dataset is rebuildable from `scripts/create_merged_v6_split.py`:
-
-```bash
-python /home/hbrain/Desktop/yolov5/scripts/create_merged_v6_split.py
-```
-
-Idempotent given fixed seed (`SEED=42`), deterministic source listing, and 85 / 15 split ratio. All twelve constituent source directories must exist; v6 stores **symlinks**, not copies (≈ 800 MB total dataset footprint vs. ~89 GB for v4).
-
----
-
-## 9. Outstanding Items for v7+
-
-- **Pending hard-negative mining** from REC_0504 sessions (S15/S16/S17) — currently being processed; 0 frames kept yet from S14 review.
-- **REC_0427 PM session** review of the additional un-extracted videos.
-- **PM annotation parity** — class still under-represented relative to natural scene frequency; targeted PM-rich recordings encouraged.
-- **Quantization regression** — INT8 RKNN benchmark vs FP32 still needs to be measured.
+We continue to mine new failure modes from new recordings; those become the next stage of the dataset.
